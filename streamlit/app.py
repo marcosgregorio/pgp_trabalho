@@ -1,66 +1,190 @@
+import random 
 import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
 
-# 1. Configuração Inicial da Página
-st.set_page_config(page_title="Monitor de Apreensões", layout="wide")
+# 1. Configuração inicial
+st.set_page_config(
+    page_title="Monitor de Apreensões",
+    layout="wide"
+)
+
 st.title("Assinatura de Apreensões: Mapeamento de Clusters (2025-2026)")
 
-# 2. Carregamento dos Dados (com Cache para performance)
+
+# 2. Carregamento dos dados
 @st.cache_data
 def carregar_dados():
-    # Em um cenário real: pd.read_csv('data/apreensoes_com_clusters.csv')
-    # Aqui criamos dados fictícios simulando o resultado do seu DBSCAN/HDBSCAN
-    dados = pd.DataFrame({
-        'lat': [-27.1, -27.12, -23.5, -23.55, -15.8, -15.7],
-        'lon': [-52.6, -52.61, -46.6, -46.65, -47.9, -47.8],
-        'motivo': ['Tráfico', 'Tráfico', 'Feminicídio', 'Briga', 'Tráfico', 'Tráfico'],
-        'cluster': [0, 0, -1, 1, 2, 2] # -1 é o ruído do DBSCAN
-    })
+    caminho = "../results/dataset_com_clusters_hdbscan_coordenadas.csv"
+
+    dados = pd.read_csv(caminho)
+
+    # Garantir que as coordenadas sejam numéricas
+    dados["latitude"] = pd.to_numeric(
+        dados["latitude"], errors="coerce"
+    )
+    dados["longitude"] = pd.to_numeric(
+        dados["longitude"], errors="coerce"
+    )
+
+    dados["cluster_hdbscan"] = pd.to_numeric(
+        dados["cluster_hdbscan"], errors="coerce"
+    )
+
+    # Remover registros sem coordenadas ou cluster
+    dados = dados.dropna(
+        subset=["latitude", "longitude", "cluster_hdbscan"]
+    ).copy()
+
+    dados["cluster_hdbscan"] = (
+        dados["cluster_hdbscan"].astype(int)
+    )
+
     return dados
+
 
 df = carregar_dados()
 
-# 3. Barra Lateral (Sidebar) para Filtros Interativos
+
+# 3. Sidebar: filtros
 st.sidebar.header("Filtros de Análise")
 
-motivos = df['motivo'].unique().tolist()
-motivo_selecionado = st.sidebar.multiselect("Motivo da Apreensão:", motivos, default=motivos)
+ufs = sorted(df["UF"].dropna().unique().tolist())
+ufs_selecionadas = st.sidebar.multiselect(
+    "UF:",
+    ufs,
+    default=ufs
+)
 
-# Aplicar o filtro no dataframe
-df_filtrado = df[df['motivo'].isin(motivo_selecionado)]
+df_filtrado = df[df["UF"].isin(ufs_selecionadas)]
 
-# 4. Função para definir as cores baseadas no Cluster
+municipios = sorted(
+    df_filtrado["MUNICIPIO"].dropna().unique().tolist()
+)
+municipios_selecionados = st.sidebar.multiselect(
+    "Município:",
+    municipios,
+    default=[]
+)
+
+if municipios_selecionados:
+    df_filtrado = df_filtrado[
+        df_filtrado["MUNICIPIO"].isin(municipios_selecionados)
+    ]
+
+tipos = sorted(
+    df_filtrado["TIPO_OCORRENCIA"].dropna().unique().tolist()
+)
+tipos_selecionados = st.sidebar.multiselect(
+    "Tipo de ocorrência:",
+    tipos,
+    default=tipos
+)
+
+df_filtrado = df_filtrado[
+    df_filtrado["TIPO_OCORRENCIA"].isin(tipos_selecionados)
+]
+
+clusters = sorted(df_filtrado["cluster_hdbscan"].unique().tolist())
+clusters_selecionados = st.sidebar.multiselect(
+    "Clusters HDBSCAN:",
+    clusters,
+    default=clusters
+)
+
+df_filtrado = df_filtrado[
+    df_filtrado["cluster_hdbscan"].isin(clusters_selecionados)
+]
+
+
+# 4. Cores dos clusters
 def definir_cor(cluster_id):
     if cluster_id == -1:
-        return 'gray'    # Ruído (apreensões isoladas)
-    elif cluster_id == 0:
-        return 'red'     # Cluster 0 (ex: Chapecó/SC)
-    elif cluster_id == 1:
-        return 'blue'    # Cluster 1 (ex: São Paulo/SP)
-    else:
-        return 'orange'  # Cluster 2, etc.
+        return "gray"
 
-# 5. Construção do Mapa com Folium (Leaflet)
-# Centralizando o mapa no Brasil
-mapa = folium.Map(location=[-15.7801, -47.9292], zoom_start=4)
-# Adicionando os pontos filtrados ao mapa
+    # Cores determinísticas para diferentes clusters
+    paleta = [
+        "red", "blue", "orange", "green", "purple",
+        "darkred", "cadetblue", "darkgreen", "pink",
+        "darkblue", "lightblue", "beige", "black"
+    ]
+
+    return paleta[cluster_id % len(paleta)]
+
+
+# 5. Indicadores
+col1, col2, col3 = st.columns(3)
+
+col1.metric("Registros no mapa", f"{len(df_filtrado):,}")
+col2.metric(
+    "Municípios",
+    f"{df_filtrado['MUNICIPIO'].nunique():,}"
+)
+col3.metric(
+    "Clusters identificados",
+    int(
+        df_filtrado.loc[
+            df_filtrado["cluster_hdbscan"] != -1,
+            "cluster_hdbscan"
+        ].nunique()
+    )
+)
+
+
+# 6. Construção do mapa
+mapa = folium.Map(
+    location=[-14.2350, -51.9253],
+    zoom_start=4,
+    tiles="OpenStreetMap"
+)
+
+deslocamento = 0.03 # eu que fiz isso aqui. eh pra evitar sobreposicao de pontos no mesmo municipio pq a ia nao entendia isso
+
+
 for _, linha in df_filtrado.iterrows():
+    cluster = linha["cluster_hdbscan"]
+    cor = definir_cor(cluster)
+
+    popup_html = f"""
+    <b>Município:</b> {linha['MUNICIPIO']} - {linha['UF']}<br>
+    <b>Tipo:</b> {linha['TIPO_OCORRENCIA']}<br>
+    <b>Espécie:</b> {linha['ESPECIE_ARMA']}<br>
+    <b>Marca:</b> {linha['MARCA_ARMA']}<br>
+    <b>Calibre:</b> {linha['CALIBRE_ARMA']}<br>
+    <b>Ano:</b> {linha['ANO_OCORRENCIA']}<br>
+    <b>Cluster:</b> {cluster}<br>
+    <b>Total:</b> {linha['TOTAL']}
+    """
+
+    nova_latitude = linha["latitude"] + (random.uniform(-deslocamento, deslocamento))
+    nova_longitude = linha["longitude"] + (random.uniform(-deslocamento, deslocamento))
+
     folium.CircleMarker(
-        location=[linha['lat'], linha['lon']],
+        location=[nova_latitude, nova_longitude],
         radius=6,
-        color=definir_cor(linha['cluster']),
+        color=cor,
         fill=True,
-        fill_color=definir_cor(linha['cluster']),
+        fill_color=cor,
         fill_opacity=0.7,
-        tooltip=f"Motivo: {linha['motivo']} | Cluster: {linha['cluster']}"
+        tooltip=f"{linha['MUNICIPIO']}/{linha['UF']} — Cluster {cluster}",
+        popup=folium.Popup(popup_html, max_width=350)
     ).add_to(mapa)
 
-# 6. Renderizando o mapa no Streamlit
-st_folium(mapa, width=1200, height=600)
 
+# 7. Renderização
+st_folium(mapa, width=None, height=650, use_container_width=True)
+
+
+# 8. Legenda e contexto
 st.markdown("""
-> **Análise da Desorganização Social:** Pontos em cinza representam o cluster `-1` (ruído/ocorrências isoladas). 
-Aglomerados coloridos representam assinaturas criminais detectadas pelos algoritmos espaciais.
+### Como interpretar os clusters
+
+- **Cinza (`-1`):** registros classificados pelo HDBSCAN como ruído,
+  sem associação a um cluster.
+- **Demais cores:** clusters identificados pelo algoritmo.
+
+**Nota metodológica:** as coordenadas representam os centroides
+geográficos dos municípios. Portanto, pontos no mesmo município podem
+se sobrepor e não indicam o endereço exato de uma ocorrência.
 """)
