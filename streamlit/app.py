@@ -1,6 +1,7 @@
 import random 
 import streamlit as st
 import pandas as pd
+import time
 import folium
 from streamlit_folium import st_folium
 
@@ -44,6 +45,8 @@ def carregar_dados():
     return dados
 
 
+inicio_filtros = time.perf_counter()
+
 df = carregar_dados()
 
 
@@ -54,7 +57,7 @@ ufs = sorted(df["UF"].dropna().unique().tolist())
 ufs_selecionadas = st.sidebar.multiselect(
     "UF:",
     ufs,
-    default=ufs
+    default=[]
 )
 
 df_filtrado = df[df["UF"].isin(ufs_selecionadas)]
@@ -97,6 +100,8 @@ df_filtrado = df_filtrado[
     df_filtrado["cluster_hdbscan"].isin(clusters_selecionados)
 ]
 
+tempo_filtros = time.perf_counter() - inicio_filtros
+
 
 # 4. Cores dos clusters
 def definir_cor(cluster_id):
@@ -132,59 +137,239 @@ col3.metric(
 )
 
 
-# 6. Construção do mapa
+# 6. Construção do mapa utilizando GeoJSON
+
+inicio_construcao = time.perf_counter()
+
 mapa = folium.Map(
     location=[-14.2350, -51.9253],
     zoom_start=4,
-    tiles="OpenStreetMap"
+    tiles="OpenStreetMap",
+    prefer_canvas=True
 )
 
-deslocamento = 0.03 # eu que fiz isso aqui. eh pra evitar sobreposicao de pontos no mesmo municipio pq a ia nao entendia isso
+deslocamento = 0.03
+
+colunas_mapa = [
+    "latitude",
+    "longitude",
+    "cluster_hdbscan",
+    "MUNICIPIO",
+    "UF",
+    "TIPO_OCORRENCIA",
+    "ESPECIE_ARMA",
+    "MARCA_ARMA",
+    "CALIBRE_ARMA",
+    "ANO_OCORRENCIA",
+    "TOTAL"
+]
+
+dados_mapa = df_filtrado[colunas_mapa]
 
 
-for _, linha in df_filtrado.iterrows():
-    cluster = linha["cluster_hdbscan"]
-    cor = definir_cor(cluster)
+# Converter valores do Pandas para tipos compatíveis com JSON
+def normalizar_valor(valor):
+    if pd.isna(valor):
+        return None
 
-    popup_html = f"""
-    <b>Município:</b> {linha['MUNICIPIO']} - {linha['UF']}<br>
-    <b>Tipo:</b> {linha['TIPO_OCORRENCIA']}<br>
-    <b>Espécie:</b> {linha['ESPECIE_ARMA']}<br>
-    <b>Marca:</b> {linha['MARCA_ARMA']}<br>
-    <b>Calibre:</b> {linha['CALIBRE_ARMA']}<br>
-    <b>Ano:</b> {linha['ANO_OCORRENCIA']}<br>
-    <b>Cluster:</b> {cluster}<br>
-    <b>Total:</b> {linha['TOTAL']}
-    """
+    if hasattr(valor, "item"):
+        return valor.item()
 
-    nova_latitude = linha["latitude"] + (random.uniform(-deslocamento, deslocamento))
-    nova_longitude = linha["longitude"] + (random.uniform(-deslocamento, deslocamento))
+    return valor
 
-    folium.CircleMarker(
-        location=[nova_latitude, nova_longitude],
-        radius=6,
-        color=cor,
-        fill=True,
-        fill_color=cor,
-        fill_opacity=0.7,
-        tooltip=f"{linha['MUNICIPIO']}/{linha['UF']} — Cluster {cluster}",
-        popup=folium.Popup(popup_html, max_width=350)
-    ).add_to(mapa)
+
+# Pré-calcular as cores dos clusters
+clusters_mapa = dados_mapa["cluster_hdbscan"].unique()
+
+cores_clusters = {
+    int(cluster): definir_cor(int(cluster))
+    for cluster in clusters_mapa
+}
+
+
+# Construir a coleção de pontos
+features = []
+
+for indice, linha in enumerate(
+    dados_mapa.itertuples(index=True, name=None)
+):
+
+    (
+        indice,
+        latitude,
+        longitude,
+        cluster,
+        municipio,
+        uf,
+        tipo,
+        especie,
+        marca,
+        calibre,
+        ano,
+        total
+    ) = linha
+
+    cluster = int(cluster)
+
+    gerador = random.Random(str(indice))
+
+    nova_latitude = float(latitude) + gerador.uniform(
+        -deslocamento,
+        deslocamento
+    )
+
+    nova_longitude = float(longitude) + gerador.uniform(
+        -deslocamento,
+        deslocamento
+    )
+
+    propriedades = {
+        "MUNICIPIO": normalizar_valor(municipio),
+        "UF": normalizar_valor(uf),
+        "TIPO_OCORRENCIA": normalizar_valor(tipo),
+        "ESPECIE_ARMA": normalizar_valor(especie),
+        "MARCA_ARMA": normalizar_valor(marca),
+        "CALIBRE_ARMA": normalizar_valor(calibre),
+        "ANO_OCORRENCIA": normalizar_valor(ano),
+        "cluster_hdbscan": cluster,
+        "TOTAL": normalizar_valor(total)
+    }
+
+    feature = {
+        "type": "Feature",
+        "id": str(indice),
+        "geometry": {
+            "type": "Point",
+            "coordinates": [
+                nova_longitude,
+                nova_latitude
+            ]
+        },
+        "properties": propriedades
+    }
+
+    features.append(feature)
+
+
+# Criar a coleção GeoJSON
+geojson_data = {
+    "type": "FeatureCollection",
+    "features": features
+}
+
+
+# Definir o estilo de cada registro conforme seu cluster
+def estilo_cluster(feature):
+    cluster = feature["properties"]["cluster_hdbscan"]
+    cor = cores_clusters[cluster]
+
+    return {
+        "color": cor,
+        "fillColor": cor,
+        "fillOpacity": 0.7,
+        "weight": 1
+    }
+
+
+# Criar a camada somente quando existem registros
+if features:
+
+    camada_registros = folium.GeoJson(
+        data=geojson_data,
+
+        name="Registros de apreensões",
+
+        marker=folium.CircleMarker(
+            radius=6,
+            color="gray",
+            fill=True,
+            fill_color="gray",
+            fill_opacity=0.7
+        ),
+
+        style_function=estilo_cluster,
+
+        tooltip=folium.GeoJsonTooltip(
+            fields=[
+                "MUNICIPIO",
+                "UF",
+                "cluster_hdbscan"
+            ],
+            aliases=[
+                "Município:",
+                "UF:",
+                "Cluster:"
+            ],
+            sticky=False
+        ),
+
+        popup=folium.GeoJsonPopup(
+            fields=[
+                "MUNICIPIO",
+                "UF",
+                "TIPO_OCORRENCIA",
+                "ESPECIE_ARMA",
+                "MARCA_ARMA",
+                "CALIBRE_ARMA",
+                "ANO_OCORRENCIA",
+                "cluster_hdbscan",
+                "TOTAL"
+            ],
+            aliases=[
+                "Município:",
+                "UF:",
+                "Tipo:",
+                "Espécie:",
+                "Marca:",
+                "Calibre:",
+                "Ano:",
+                "Cluster:",
+                "Total:"
+            ],
+            localize=False
+        )
+    )
+
+    camada_registros.add_to(mapa)
+
+
+tempo_construcao = time.perf_counter() - inicio_construcao
 
 
 # 7. Renderização
-st_folium(mapa, width=None, height=650, use_container_width=True)
 
+st_folium(
+    mapa,
+    key="mapa_apreensoes",
+    returned_objects=[],
+    width=None,
+    height=650,
+    use_container_width=True
+)
 
-# 8. Legenda e contexto
-st.markdown("""
-### Como interpretar os clusters
+# 8. Métricas da construção
 
-- **Cinza (`-1`):** registros classificados pelo HDBSCAN como ruído,
-  sem associação a um cluster.
-- **Demais cores:** clusters identificados pelo algoritmo.
+st.markdown("### Desempenho do mapa")
 
-**Nota metodológica:** as coordenadas representam os centroides
-geográficos dos municípios. Portanto, pontos no mesmo município podem
-se sobrepor e não indicam o endereço exato de uma ocorrência.
-""")
+col1, col2, col3 = st.columns(3)
+
+col1.metric(
+    "Registros preparados",
+    f"{len(dados_mapa):,}"
+)
+
+col2.metric(
+    "Pontos individuais",
+    f"{len(features):,}"
+)
+
+col3.metric(
+    "Construção",
+    f"{tempo_construcao:.3f} s"
+)
+
+print(
+    f"[MAPA] Registros: {len(dados_mapa):,} | "
+    f"Pontos: {len(features):,} | "
+    f"Construção: {tempo_construcao:.3f}s"
+)
