@@ -1,3 +1,4 @@
+from pathlib import Path
 import random 
 import streamlit as st
 import pandas as pd
@@ -17,9 +18,17 @@ st.title("Assinatura de Apreensões: Mapeamento de Clusters (2025-2026)")
 # 2. Carregamento dos dados
 @st.cache_data
 def carregar_dados():
+
+    BASE_DIR = Path(__file__).resolve().parent.parent
+
+    DATASET_PATH = (
+        BASE_DIR / "results" /
+        "dataset_com_clusters_hdbscan_coordenadas.csv"
+    )
+
     caminho = "../results/dataset_com_clusters_hdbscan_coordenadas.csv"
 
-    dados = pd.read_csv(caminho)
+    dados = pd.read_csv(DATASET_PATH)
 
     # Garantir que as coordenadas sejam numéricas
     dados["latitude"] = pd.to_numeric(
